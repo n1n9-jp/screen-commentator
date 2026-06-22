@@ -36,10 +36,15 @@ export function App() {
 
   useEffect(() => {
     let isMounted = true;
+    const urlError = authErrorFromURL();
 
     supabase.auth.getSession().then(({ data }) => {
       if (!isMounted) return;
       setSessionState(data.session ? 'signed-in' : 'signed-out');
+      if (urlError) {
+        setMessage(urlError);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -52,16 +57,19 @@ export function App() {
     };
   }, []);
 
-  async function sendOtp(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setMessage('');
+  function authErrorFromURL(): string {
+    const params = new URLSearchParams(`${window.location.search}&${window.location.hash.replace(/^#/, '')}`);
+    const code = params.get('error_code') ?? params.get('error');
+    const description = params.get('error_description');
+    if (!code && !description) return '';
 
-    const normalizedEmail = email.trim().toLowerCase();
-    if (!isAllowedMusabiEmail(normalizedEmail)) {
-      setMessage('musabi.ac.jp またはそのサブドメインのメールアドレスを使ってください。');
-      return;
+    if (code === 'otp_expired' || description?.toLowerCase().includes('expired')) {
+      return 'ログインコードの有効期限が切れています。新しいコードを送信してください。';
     }
+    return description ?? 'ログインに失敗しました。新しいコードを送信してください。';
+  }
 
+  async function requestOtp(normalizedEmail: string) {
     setIsBusy(true);
     const { error } = await supabase.auth.signInWithOtp({
       email: normalizedEmail,
@@ -78,7 +86,32 @@ export function App() {
     }
 
     setSessionState('otp-sent');
-    setMessage('メールに届いた6桁コードを入力してください。');
+    setMessage('メールに届いた最新の6桁コードを入力してください。');
+  }
+
+  async function sendOtp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage('');
+
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isAllowedMusabiEmail(normalizedEmail)) {
+      setMessage('musabi.ac.jp またはそのサブドメインのメールアドレスを使ってください。');
+      return;
+    }
+
+    await requestOtp(normalizedEmail);
+  }
+
+  async function resendOtp() {
+    setMessage('');
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isAllowedMusabiEmail(normalizedEmail)) {
+      setSessionState('signed-out');
+      setMessage('メールアドレスを入力し直してください。');
+      return;
+    }
+    setOtp('');
+    await requestOtp(normalizedEmail);
   }
 
   async function verifyOtp(event: FormEvent<HTMLFormElement>) {
@@ -190,6 +223,9 @@ export function App() {
             </button>
             <button type="button" className="secondary" onClick={() => setSessionState('signed-out')}>
               メールを変更
+            </button>
+            <button type="button" className="secondary" onClick={resendOtp} disabled={isBusy}>
+              コードを再送
             </button>
           </form>
         )}
