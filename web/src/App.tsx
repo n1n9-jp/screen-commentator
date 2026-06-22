@@ -34,12 +34,24 @@ function roomURL(roomCode: string): string {
   return `${window.location.origin}/r/${encodeURIComponent(roomCode)}`;
 }
 
+function authParamsFromURL(): URLSearchParams {
+  return new URLSearchParams(`${window.location.search}&${window.location.hash.replace(/^#/, '')}`);
+}
+
+function isPasswordRecoveryURL(): boolean {
+  return authParamsFromURL().get('type') === 'recovery';
+}
+
 export function App() {
   const roomCode = useMemo(roomCodeFromPath, []);
   const [sessionState, setSessionState] = useState<SessionState>('checking');
+  const [isPasswordRecovery, setIsPasswordRecovery] = useState(isPasswordRecoveryURL);
+  const [passwordRecoveryComplete, setPasswordRecoveryComplete] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>('password');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirmation, setNewPasswordConfirmation] = useState('');
   const [otp, setOtp] = useState('');
   const [comment, setComment] = useState('');
   const [message, setMessage] = useState('');
@@ -49,17 +61,23 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
     const urlError = authErrorFromURL();
+    const recoveryURL = isPasswordRecoveryURL();
 
     supabase.auth.getSession().then(({ data }) => {
       if (!isMounted) return;
       setSessionState(data.session ? 'signed-in' : 'signed-out');
+      setIsPasswordRecovery(recoveryURL && !!data.session);
       if (urlError) {
         setMessage(urlError);
         window.history.replaceState({}, document.title, window.location.pathname);
       }
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY' || (isPasswordRecoveryURL() && !!session)) {
+        setIsPasswordRecovery(true);
+        setMessage('新しいパスワードを設定してください。');
+      }
       setSessionState(session ? 'signed-in' : 'signed-out');
     });
 
@@ -80,7 +98,7 @@ export function App() {
   }, [otpCooldownRemaining]);
 
   function authErrorFromURL(): string {
-    const params = new URLSearchParams(`${window.location.search}&${window.location.hash.replace(/^#/, '')}`);
+    const params = authParamsFromURL();
     const code = params.get('error_code') ?? params.get('error');
     const description = params.get('error_description');
     if (!code && !description) return '';
@@ -167,6 +185,37 @@ export function App() {
     setMessage('');
   }
 
+  async function updatePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage('');
+
+    if (newPassword.length < 8) {
+      setMessage('パスワードは8文字以上にしてください。');
+      return;
+    }
+    if (newPassword !== newPasswordConfirmation) {
+      setMessage('確認用パスワードが一致しません。');
+      return;
+    }
+
+    setIsBusy(true);
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    setIsBusy(false);
+
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
+    setNewPassword('');
+    setNewPasswordConfirmation('');
+    setIsPasswordRecovery(false);
+    setPasswordRecoveryComplete(true);
+    setSessionState('signed-in');
+    window.history.replaceState({}, document.title, window.location.pathname);
+    setMessage(roomCode ? 'パスワードを更新しました。' : 'パスワードを更新しました。投稿URLを開いてログインしてください。');
+  }
+
   async function resendOtp() {
     setMessage('');
     const normalizedEmail = email.trim().toLowerCase();
@@ -251,7 +300,7 @@ export function App() {
     setMessage('送信しました。');
   }
 
-  if (!roomCode) {
+  if (!roomCode && !isPasswordRecovery && !passwordRecoveryComplete) {
     return (
       <main className="shell">
         <section className="panel">
@@ -266,12 +315,46 @@ export function App() {
     <main className="shell">
       <section className="panel">
         <p className="eyebrow">Screen Commentator</p>
-        <h1>コメント投稿</h1>
-        <p className="room">Room {roomCode}</p>
+        <h1>{isPasswordRecovery ? 'パスワード再設定' : passwordRecoveryComplete ? 'パスワード更新済み' : 'コメント投稿'}</h1>
+        {roomCode && <p className="room">Room {roomCode}</p>}
 
-        {sessionState === 'checking' && <p className="muted">確認中...</p>}
+        {passwordRecoveryComplete && !roomCode && (
+          <p className="muted">投稿URLを開いてログインしてください。</p>
+        )}
 
-        {sessionState === 'signed-out' && (
+        {isPasswordRecovery && !passwordRecoveryComplete && (
+          <form onSubmit={updatePassword} className="form">
+            <label>
+              新しいパスワード
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                autoComplete="new-password"
+                minLength={8}
+                required
+              />
+            </label>
+            <label>
+              新しいパスワード（確認）
+              <input
+                type="password"
+                value={newPasswordConfirmation}
+                onChange={(event) => setNewPasswordConfirmation(event.target.value)}
+                autoComplete="new-password"
+                minLength={8}
+                required
+              />
+            </label>
+            <button type="submit" disabled={isBusy}>
+              {isBusy ? '更新中...' : 'パスワードを更新'}
+            </button>
+          </form>
+        )}
+
+        {!isPasswordRecovery && sessionState === 'checking' && <p className="muted">確認中...</p>}
+
+        {!isPasswordRecovery && sessionState === 'signed-out' && (
           <div className="auth-mode" role="tablist" aria-label="ログイン方法">
             <button
               type="button"
@@ -296,7 +379,7 @@ export function App() {
           </div>
         )}
 
-        {sessionState === 'signed-out' && authMode === 'password' && (
+        {!isPasswordRecovery && sessionState === 'signed-out' && authMode === 'password' && (
           <form onSubmit={signInWithPassword} className="form">
             <label>
               メールアドレス
@@ -325,7 +408,7 @@ export function App() {
           </form>
         )}
 
-        {sessionState === 'signed-out' && authMode === 'otp' && (
+        {!isPasswordRecovery && sessionState === 'signed-out' && authMode === 'otp' && (
           <form onSubmit={sendOtp} className="form">
             <label>
               メールアドレス
@@ -348,7 +431,7 @@ export function App() {
           </form>
         )}
 
-        {sessionState === 'otp-sent' && (
+        {!isPasswordRecovery && sessionState === 'otp-sent' && (
           <form onSubmit={verifyOtp} className="form">
             <label>
               6桁コード
@@ -374,7 +457,7 @@ export function App() {
           </form>
         )}
 
-        {sessionState === 'signed-in' && (
+        {!isPasswordRecovery && sessionState === 'signed-in' && roomCode && (
           <form onSubmit={submitComment} className="form">
             <label>
               コメント
