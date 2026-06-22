@@ -128,7 +128,7 @@ export function App() {
     if (error) {
       if (/rate limit|too many requests/i.test(error.message)) {
         setOtpCooldownRemaining(OTP_RESEND_COOLDOWN_SECONDS);
-        setMessage('メール送信制限に達しました。少し待ってから再送してください。');
+        setMessage('Supabaseのメール送信制限に達しました。パスワードログインを使うか、時間をおいて再送してください。');
       } else {
         setMessage(error.message);
       }
