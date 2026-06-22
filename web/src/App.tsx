@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { supabase } from './supabase';
 
 const MAX_COMMENT_LENGTH = 80;
+const OTP_RESEND_COOLDOWN_SECONDS = 60;
 
 type SessionState = 'checking' | 'signed-out' | 'otp-sent' | 'signed-in';
 
@@ -21,6 +22,13 @@ function normalizeComment(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function normalizeOtpToken(text: string): string {
+  return text
+    .trim()
+    .replace(/[０-９]/g, (char) => String(char.charCodeAt(0) - 0xff10))
+    .replace(/\s+/g, '');
+}
+
 function roomURL(roomCode: string): string {
   return `${window.location.origin}/r/${encodeURIComponent(roomCode)}`;
 }
@@ -33,6 +41,7 @@ export function App() {
   const [comment, setComment] = useState('');
   const [message, setMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [otpCooldownRemaining, setOtpCooldownRemaining] = useState(0);
 
   useEffect(() => {
     let isMounted = true;
@@ -57,6 +66,16 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (otpCooldownRemaining <= 0) return;
+
+    const timer = window.setTimeout(() => {
+      setOtpCooldownRemaining((remaining) => Math.max(remaining - 1, 0));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [otpCooldownRemaining]);
+
   function authErrorFromURL(): string {
     const params = new URLSearchParams(`${window.location.search}&${window.location.hash.replace(/^#/, '')}`);
     const code = params.get('error_code') ?? params.get('error');
@@ -70,6 +89,11 @@ export function App() {
   }
 
   async function requestOtp(normalizedEmail: string) {
+    if (otpCooldownRemaining > 0) {
+      setMessage(`${otpCooldownRemaining}秒後にもう一度送信できます。`);
+      return;
+    }
+
     setIsBusy(true);
     const { error } = await supabase.auth.signInWithOtp({
       email: normalizedEmail,
@@ -81,10 +105,16 @@ export function App() {
     setIsBusy(false);
 
     if (error) {
-      setMessage(error.message);
+      if (/rate limit|too many requests/i.test(error.message)) {
+        setOtpCooldownRemaining(OTP_RESEND_COOLDOWN_SECONDS);
+        setMessage('メール送信制限に達しました。少し待ってから再送してください。');
+      } else {
+        setMessage(error.message);
+      }
       return;
     }
 
+    setOtpCooldownRemaining(OTP_RESEND_COOLDOWN_SECONDS);
     setSessionState('otp-sent');
     setMessage('メールに届いた最新の6桁コードを入力してください。');
   }
@@ -119,20 +149,41 @@ export function App() {
     setMessage('');
     setIsBusy(true);
 
-    const { error } = await supabase.auth.verifyOtp({
-      email: email.trim().toLowerCase(),
-      token: otp.trim(),
-      type: 'email',
-    });
-    setIsBusy(false);
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedToken = normalizeOtpToken(otp);
 
-    if (error) {
-      setMessage(error.message);
+    if (normalizedToken.length !== 6) {
+      setIsBusy(false);
+      setMessage('メールに届いた6桁コードを入力してください。');
       return;
     }
 
-    setSessionState('signed-in');
-    setMessage('');
+    const verifyTypes = ['email', 'signup'] as const;
+    let lastError: Error | null = null;
+
+    for (const type of verifyTypes) {
+      const { error } = await supabase.auth.verifyOtp({
+        email: normalizedEmail,
+        token: normalizedToken,
+        type,
+      });
+
+      if (!error) {
+        setIsBusy(false);
+        setSessionState('signed-in');
+        setMessage('');
+        return;
+      }
+
+      lastError = error;
+      if (!/token|expired|invalid/i.test(error.message)) {
+        break;
+      }
+    }
+
+    setIsBusy(false);
+
+    setMessage(lastError?.message ?? 'ログインコードを確認できませんでした。新しいコードを送信してください。');
   }
 
   async function submitComment(event: FormEvent<HTMLFormElement>) {
@@ -198,8 +249,12 @@ export function App() {
                 required
               />
             </label>
-            <button type="submit" disabled={isBusy}>
-              {isBusy ? '送信中...' : 'コードを送信'}
+            <button type="submit" disabled={isBusy || otpCooldownRemaining > 0}>
+              {isBusy
+                ? '送信中...'
+                : otpCooldownRemaining > 0
+                  ? `${otpCooldownRemaining}秒後に再送`
+                  : 'コードを送信'}
             </button>
           </form>
         )}
@@ -224,8 +279,8 @@ export function App() {
             <button type="button" className="secondary" onClick={() => setSessionState('signed-out')}>
               メールを変更
             </button>
-            <button type="button" className="secondary" onClick={resendOtp} disabled={isBusy}>
-              コードを再送
+            <button type="button" className="secondary" onClick={resendOtp} disabled={isBusy || otpCooldownRemaining > 0}>
+              {otpCooldownRemaining > 0 ? `${otpCooldownRemaining}秒後に再送` : 'コードを再送'}
             </button>
           </form>
         )}
