@@ -25,6 +25,11 @@ enum CommentColor: String, CaseIterable, Sendable {
     }
 }
 
+enum CommentSource: String, Sendable {
+    case ai
+    case user
+}
+
 struct Comment: Sendable {
     let id: UUID
     let text: String
@@ -33,8 +38,16 @@ struct Comment: Sendable {
     let style: CommentStyle
     let color: CommentColor
     let speedMultiplier: Double
+    let source: CommentSource
 
-    init(text: String, lane: Int, style: CommentStyle = .scroll, color: CommentColor = .white, speedMultiplier: Double = 1.0) {
+    init(
+        text: String,
+        lane: Int,
+        style: CommentStyle = .scroll,
+        color: CommentColor = .white,
+        speedMultiplier: Double = 1.0,
+        source: CommentSource = .ai
+    ) {
         self.id = UUID()
         self.text = text
         self.lane = lane
@@ -42,6 +55,7 @@ struct Comment: Sendable {
         self.style = style
         self.color = color
         self.speedMultiplier = speedMultiplier
+        self.source = source
     }
 }
 

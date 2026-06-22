@@ -1,0 +1,195 @@
+# Remote Posting Startup Guide
+
+Web投稿連携をローカルで検証するための起動手順です。npmはリポジトリ直下ではなく`web/`で実行し、Xcodeでは`ScreenCommentator.xcodeproj`を開きます。
+
+## 1. Supabaseを設定する
+
+Supabase Dashboardで対象Projectを開き、`SQL Editor`でmigrationを実行します。
+
+1. `supabase/migrations/202606170001_remote_comments.sql`を実行
+2. `supabase/migrations/202606220001_host_admin_tokens.sql`を実行
+3. `supabase/migrations/202606220002_pgcrypto_schema.sql`を実行
+4. `supabase/migrations/202606220003_disambiguate_submit_comment.sql`を実行
+
+すでに1つ目と2つ目を実行済みなら、3つ目と4つ目だけ実行します。`column reference "created_at" is ambiguous`が出た場合は、4つ目のmigrationをSQL Editorで実行してください。
+
+次に管理者トークンを登録します。`replace-with-a-long-random-token`は実際の長いランダム文字列に置き換えます。
+
+```sql
+insert into public.host_admin_tokens(token_hash, label)
+values (
+  encode(extensions.digest('replace-with-a-long-random-token', 'sha256'), 'hex'),
+  'default admin token'
+);
+```
+
+macOSアプリには、ハッシュではなく元の文字列を`Remote Posting > Host admin token`へ入力します。
+
+## 2. Supabase Authを設定する
+
+Email loginはSupabaseでは標準で有効なことが多いですが、以下を確認します。
+
+- `Authentication`または`Auth` -> `Sign In / Providers` -> `Email`
+- Email providerが有効
+- 必要なら`Email OTP Expiration`を確認
+
+メール内リンクの戻り先も許可します。
+
+- `Authentication`または`Auth` -> `URL Configuration`
+- `Site URL`: ローカル検証なら`http://localhost:5173`
+- `Redirect URLs`: ローカル検証なら`http://localhost:5173/**`
+- Vercelで検証する場合は、VercelのURLも`https://your-app.vercel.app/**`のように追加
+
+OTPメールは`Confirm sign up`ではなく、`Magic Link or OTP`テンプレートを編集します。
+
+- `Authentication`または`Auth` -> `Emails`または`Email Templates`
+- `Magic Link or OTP`を開く
+- `{{ .ConfirmationURL }}`のリンク行を消し、`{{ .Token }}`を本文に出す
+
+例:
+
+```html
+<h2>ログインコード</h2>
+<p>以下の6桁コードを投稿画面に入力してください。</p>
+<p style="font-size: 24px; font-weight: bold; letter-spacing: 4px;">{{ .Token }}</p>
+```
+
+初めて使うメールアドレスでは、Supabaseが`Confirm your email address`という新規登録確認メールを送ることがあります。そのリンクを使う場合でも、Web UIはルームURLへ戻るように`/r/ROOMCODE`をredirect先に指定しています。リンク先が許可されない場合は、上の`Redirect URLs`設定を確認します。
+
+新規ユーザー作成時のドメイン制限も設定します。
+
+- `Authentication`または`Auth` -> `Auth Hooks`
+- `Before User Created`を有効化
+- Typeは`Postgres Function`
+- Function指定欄がある場合は`public.hook_restrict_musabi_signup`
+- URI指定欄の場合は`pg-functions://postgres/public/hook_restrict_musabi_signup`
+
+投稿RPC側でも`musabi.ac.jp`と`*.musabi.ac.jp`以外は拒否しますが、Auth Hookも設定するとログイン作成前に弾けます。
+
+## 3. Web UIを起動する
+
+必ず`web/`へ移動してからnpmを実行します。
+
+```bash
+cd /Users/yuichiyazaki/Documents/GitHubRepository/Prj_App_OtherWorks/screen-commentator/web
+cp .env.example .env
+```
+
+`.env`にSupabaseのProject URLとanon keyを入れます。
+
+```bash
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key
+```
+
+起動します。
+
+```bash
+npm install
+npm run dev
+```
+
+表示されたURLを控えます。通常は以下です。
+
+```text
+http://localhost:5173
+```
+
+`Could not read package.json`が出た場合は、リポジトリ直下でnpmを実行しています。`web/`へ移動してやり直します。
+
+## 4. macOSアプリを起動する
+
+画面収録許可が必要なため、XcodeのRunではなく固定パスへインストールしたアプリを起動します。XcodeのDebug実行は署名・パスが変わり、macOSの画面収録許可が噛み合わないことがあります。
+
+```bash
+cd /Users/yuichiyazaki/Documents/GitHubRepository/Prj_App_OtherWorks/screen-commentator
+chmod +x scripts/install-and-open-app.sh
+./scripts/install-and-open-app.sh
+```
+
+このスクリプトはアプリをビルドし、既存の`~/Applications/ScreenCommentator.app`を自動で上書きして起動します。手動コピーは不要です。KeychainにApple Development証明書がある場合はそれで署名します。ない場合はローカルコード署名証明書を作って署名します。画面収録許可は署名に紐づくため、XcodeのRunやadhoc署名のアプリではなく、この固定パス・固定署名版で検証します。
+
+初回はアプリ上部に表示される`Request Screen Recording`を押すか、`Start`を押して画面収録要求を発火させます。その後、macOSの`System Settings > Privacy & Security > Screen & System Audio Recording`で`ScreenCommentator`を許可します。許可後はアプリを一度終了してから、`~/Applications/ScreenCommentator.app`を開き直します。
+
+許可済みに見えるのに`Start`できない場合は、`ScreenCommentator`の許可を一度OFFにしてONに戻し、アプリを終了して`~/Applications/ScreenCommentator.app`を開き直します。それでも変わらない場合は、古いDebugビルドへの許可が残っている可能性があるため、以下で画面収録許可をリセットしてからスクリプトを実行し直します。
+
+```bash
+tccutil reset ScreenCapture com.local.screencommentator
+```
+
+Runすると小さい設定ウィンドウが開きます。このウィンドウ内の設定リストを下へスクロールすると、`Blacklist Monitor`の下、`Appearance`の上に`REMOTE POSTING`という見出しがあります。ここが`Remote Posting`設定です。
+
+`REMOTE POSTING`には以下を入力します。
+
+- `Supabase URL`: Supabase Project URL
+- `Supabase anon key`: Supabase anon public key。`anon`というラベル文字は入れず、`eyJ...`または`sb_publishable_...`で始まるキー本体だけを入れる
+- `Vercel base URL`: ローカル検証なら`http://localhost:5173`
+- `Host admin token`: Supabaseに登録した元の管理者トークン文字列
+
+ここからの順番が重要です。
+
+1. `Create`を押す
+2. `Room code`と`Host token`が自動入力されることを確認する
+3. 表示された投稿URLをコピーする
+4. `Remote Posting > Enable`がONであることを確認する
+5. その後にアプリ上部の`Start`を押す
+
+`Start`は`Create`後、`Enable`をONにした後に押します。`Room code`と`Host token`がない状態で`Start`しても、Web投稿は取得できません。
+
+`Start`でAI画面キャプチャとWeb投稿の取得が始まります。画面収録許可が通っていない場合、AIコメントは生成できないためStartしません。
+
+AIコメントだけを止めたい場合は、設定ウィンドウの`AI Comments > Enable`をOFFにします。この場合、`Remote Posting > Enable`がONなら、`Start`でWeb投稿だけを取得して流します。AIコメントOFF時は画面収録を使わないため、画面収録許可は不要です。
+
+Ollamaを使う場合は、設定ウィンドウの`AI Comments > Provider`を`Ollama (Local)`にし、`Model`には実際にインストール済みのモデルを選びます。インストール済みモデルは以下で確認できます。
+
+```bash
+ollama list
+```
+
+`Model`で選んだ値が`ollama list`にない場合、AIコメント生成は失敗します。このアプリはインストール済みの対応モデルが見つかる場合、自動でそちらへ切り替えます。例として`gemma4:e4b`が入っている環境では、軽い`Gemma 4 E4B`を優先して使います。`qwen2.5vl:32b`も画像対応ですが、MacBook Airでは重いことがあります。
+
+Web投稿が流れない場合は、`Remote Posting`欄の表示を確認します。`Polling off`なら`Enable`がOFFです。`Start`後に`Fetch Now`を押すと、その時点でSupabaseから新規コメントを手動取得し、`no new comments`または取得件数を表示します。
+
+## 5. 投稿を検証する
+
+投稿URLをブラウザで開きます。
+
+```text
+http://localhost:5173/r/ROOMCODE
+```
+
+許可されるメールの例:
+
+```text
+user@musabi.ac.jp
+user@ct.musabi.ac.jp
+user@fs.musabi.ac.jp
+```
+
+拒否されるメールの例:
+
+```text
+user@gmail.com
+user@evil-musabi.ac.jp
+user@musabi.ac.jp.example.com
+```
+
+macOSアプリ側で`Start`済みの状態にしてから、Web投稿画面からコメントを送ります。
+
+通常時はAIコメントとWeb投稿コメントが同じ見た目で流れます。`Control + Option + Command`を押している間だけ、AI投稿が青、ユーザー投稿が黄になります。
+
+## 6. 最終確認コマンド
+
+Web:
+
+```bash
+cd /Users/yuichiyazaki/Documents/GitHubRepository/Prj_App_OtherWorks/screen-commentator/web
+npm run build
+```
+
+macOS:
+
+```bash
+cd /Users/yuichiyazaki/Documents/GitHubRepository/Prj_App_OtherWorks/screen-commentator
+xcodebuild -project ScreenCommentator.xcodeproj -scheme ScreenCommentator -destination 'platform=macOS' -derivedDataPath DerivedData build
+```

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var viewModel: CommentViewModel
@@ -11,7 +12,7 @@ struct ContentView: View {
             Divider()
             footer
         }
-        .frame(width: 360, height: 640)
+        .frame(width: 380, height: 780)
     }
 
     // MARK: - Header
@@ -57,11 +58,36 @@ struct ContentView: View {
             if !viewModel.statusMessage.isEmpty {
                 Text(viewModel.statusMessage)
                     .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            }
+
+            if viewModel.aiCommentsEnabled && !viewModel.isScreenRecordingPermissionGranted {
+                HStack(spacing: 8) {
+                    Button("Request Screen Recording") {
+                        viewModel.requestScreenRecordingPermission()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Recheck") {
+                        viewModel.refreshScreenRecordingPermissionStatus()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Open Settings") {
+                        viewModel.openScreenRecordingSettings()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Text("After enabling permission in System Settings, quit this app and run it again.")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
             }
         }
         .padding(16)
+        .onAppear {
+            viewModel.refreshScreenRecordingPermissionStatus()
+        }
     }
 
     // MARK: - Settings
@@ -72,6 +98,7 @@ struct ContentView: View {
                 providerSection
                 generationSection
                 blacklistSection
+                remotePostingSection
                 appearanceSection
             }
             .padding(16)
@@ -87,48 +114,58 @@ struct ContentView: View {
 
     private var providerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("Provider")
+            sectionLabel("AI Comments")
 
-            Picker("Source", selection: $viewModel.selectedProvider) {
-                ForEach(CommentProvider.allCases) { provider in
-                    Text(provider.displayName).tag(provider)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            Toggle("Enable", isOn: $viewModel.aiCommentsEnabled)
 
-            if viewModel.selectedProvider == .ollama {
-                Picker("Model", selection: $viewModel.selectedOllamaModel) {
-                    ForEach(OllamaModel.allCases) { model in
-                        Text(model.displayName).tag(model)
+            if viewModel.aiCommentsEnabled {
+                sectionLabel("Provider")
+
+                Picker("Source", selection: $viewModel.selectedProvider) {
+                    ForEach(CommentProvider.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if viewModel.selectedProvider == .ollama {
+                    Picker("Model", selection: $viewModel.selectedOllamaModel) {
+                        ForEach(OllamaModel.allCases) { model in
+                            Text(model.displayName).tag(model)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                } else {
+                    Picker("Model", selection: $viewModel.selectedGeminiModel) {
+                        ForEach(GeminiModel.allCases) { model in
+                            Text(model.displayName).tag(model)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    SecureField("API Key", text: $viewModel.geminiApiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                sectionLabel("Pipeline")
+
+                Picker("Pipeline", selection: $viewModel.pipelineMode) {
+                    ForEach(PipelineMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Text(pipelineHint)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             } else {
-                Picker("Model", selection: $viewModel.selectedGeminiModel) {
-                    ForEach(GeminiModel.allCases) { model in
-                        Text(model.displayName).tag(model)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                SecureField("API Key", text: $viewModel.geminiApiKey)
-                    .textFieldStyle(.roundedBorder)
+                Text("Web comments can still run when Remote Posting is enabled.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-
-            sectionLabel("Pipeline")
-
-            Picker("Pipeline", selection: $viewModel.pipelineMode) {
-                ForEach(PipelineMode.allCases) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            Text(pipelineHint)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
         }
         .disabled(viewModel.isRunning)
     }
@@ -145,42 +182,48 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionLabel("Generation")
 
-            HStack(spacing: 8) {
-                Text("Comments")
-                Spacer()
-                Slider(
-                    value: Binding(
-                        get: { Double(viewModel.baseCommentCount) },
-                        set: { viewModel.baseCommentCount = Int($0) }
-                    ),
-                    in: 1...10,
-                    step: 1
-                )
-                .frame(maxWidth: 160)
-                Text("\(viewModel.baseCommentCount)")
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 20, alignment: .trailing)
-            }
-
-            ForEach(Persona.allCases) { persona in
-                PersonaRow(
-                    persona: persona,
-                    isEnabled: Binding(
-                        get: { viewModel.personaEnabled[persona] ?? false },
-                        set: { newValue in
-                            let otherEnabled = Persona.allCases
-                                .filter { $0 != persona }
-                                .contains { viewModel.personaEnabled[$0] == true }
-                            if !newValue && !otherEnabled { return }
-                            viewModel.personaEnabled[persona] = newValue
-                        }
-                    ),
-                    weight: Binding(
-                        get: { viewModel.personaWeights[persona] ?? 0.5 },
-                        set: { viewModel.personaWeights[persona] = $0 }
+            if viewModel.aiCommentsEnabled {
+                HStack(spacing: 8) {
+                    Text("Comments")
+                    Spacer()
+                    Slider(
+                        value: Binding(
+                            get: { Double(viewModel.baseCommentCount) },
+                            set: { viewModel.baseCommentCount = Int($0) }
+                        ),
+                        in: 1...10,
+                        step: 1
                     )
-                )
+                    .frame(maxWidth: 160)
+                    Text("\(viewModel.baseCommentCount)")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, alignment: .trailing)
+                }
+
+                ForEach(Persona.allCases) { persona in
+                    PersonaRow(
+                        persona: persona,
+                        isEnabled: Binding(
+                            get: { viewModel.personaEnabled[persona] ?? false },
+                            set: { newValue in
+                                let otherEnabled = Persona.allCases
+                                    .filter { $0 != persona }
+                                    .contains { viewModel.personaEnabled[$0] == true }
+                                if !newValue && !otherEnabled { return }
+                                viewModel.personaEnabled[persona] = newValue
+                            }
+                        ),
+                        weight: Binding(
+                            get: { viewModel.personaWeights[persona] ?? 0.5 },
+                            set: { viewModel.personaWeights[persona] = $0 }
+                        )
+                    )
+                }
+            } else {
+                Text("AI generation is off.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -279,10 +322,105 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Remote Posting
+
+    private var remotePostingSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("Remote Posting")
+
+            Toggle("Enable", isOn: $viewModel.remotePostingEnabled)
+
+            TextField("Supabase URL", text: $viewModel.remoteSupabaseURL)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .disabled(viewModel.isRunning)
+
+            SecureField("Supabase anon key", text: $viewModel.remoteSupabaseAnonKey)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .disabled(viewModel.isRunning)
+
+            TextField("Vercel base URL", text: $viewModel.remoteWebBaseURL)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+
+            SecureField("Host admin token", text: $viewModel.remoteHostAdminToken)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .disabled(viewModel.isRunning)
+
+            HStack(spacing: 6) {
+                TextField("Room code", text: Binding(
+                    get: { viewModel.remoteRoomCode },
+                    set: { viewModel.remoteRoomCode = $0.uppercased() }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .font(.caption.monospaced())
+
+                Button("Create") {
+                    Task { await viewModel.createRemoteRoom() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.isRunning)
+            }
+
+            HStack(spacing: 6) {
+                Button("Fetch Now") {
+                    viewModel.fetchRemoteCommentsNow()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!viewModel.isRunning)
+
+                Text(viewModel.remotePostingEnabled ? "Polling enabled" : "Polling off")
+                    .font(.caption2)
+                    .foregroundStyle(viewModel.remotePostingEnabled ? .green : .secondary)
+            }
+
+            SecureField("Host token", text: $viewModel.remoteHostToken)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .disabled(viewModel.isRunning)
+
+            if let postingURL = viewModel.remotePostingURL {
+                HStack(spacing: 6) {
+                    Text(postingURL)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(postingURL, forType: .string)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            if !viewModel.remoteStatusMessage.isEmpty {
+                Text(viewModel.remoteStatusMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            if viewModel.isSourceRevealActive {
+                Text("Source reveal active")
+                    .font(.caption2)
+                    .foregroundStyle(.yellow)
+            }
+        }
+    }
+
     // MARK: - Footer
 
     private var footer: some View {
-        Text(viewModel.selectedProvider == .ollama
+        Text(!viewModel.aiCommentsEnabled
+            ? "AI comments disabled"
+            : viewModel.selectedProvider == .ollama
             ? "Requires Ollama with a vision model"
             : "Uses Google Gemini API")
             .font(.caption2)

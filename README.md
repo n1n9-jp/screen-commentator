@@ -128,6 +128,19 @@ ollama pull qwen2.5vl:3b
 2. アプリ内で "Gemini (Cloud)" を選択
 3. API キーを貼り付け
 
+## ウェブ投稿連携
+
+Supabase + Web UI から匿名表示のユーザー投稿を受け付ける場合は、起動順序とSupabase設定を [Remote Posting Startup Guide](docs/guides/remote-posting-startup.md) にまとめています。
+
+ローカルでWeb UIを起動する場合は、必ず`web/`でnpmを実行します。
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+
 ## アーキテクチャ
 
 ```
@@ -199,6 +212,7 @@ Smart mode との違いは、画像を LLM に送信しない点。代わりに 
 | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | [Pipeline Mode Architecture](docs/decisions/0001-pipeline-mode-architecture.md)       | 3 つのパイプラインモード (Smart/OCR/Basic) の設計判断。検討した選択肢の比較と採用理由                                |
 | [Gemini Thinking Model Integration](docs/guides/gemini-thinking-model-integration.md) | Gemini 2.5/3 系 thinking model の response parts 構造、thinkingConfig による制御、maxOutputTokens 共有問題の解決方法 |
+| [Remote Posting Startup Guide](docs/guides/remote-posting-startup.md)                 | Supabase、Web UI、Xcodeアプリを起動してWeb投稿連携を検証する手順                                                     |
 | [Session Log: Phase 2](docs/sessions/2026-03-02-phase2-pipeline-modes.md)             | Phase 2 実装の全作業ログ。変更ファイル一覧、学んだこと、未完了タスク                                                 |
 
 ## License

@@ -9,17 +9,29 @@ final class CommentViewModel: ObservableObject {
     @Published var isRunning = false
     @Published var statusMessage = ""
     @Published var commentCount = 0
+    @Published var isScreenRecordingPermissionGranted = ScreenCaptureService.hasScreenRecordingPermission
 
     // Provider & model selection
-    @Published var selectedProvider: CommentProvider = .ollama
-    @Published var selectedOllamaModel: OllamaModel = .qwen25vl_3b
-    @Published var selectedGeminiModel: GeminiModel = .flash25Lite
+    @Published var aiCommentsEnabled: Bool = UserDefaults.standard.object(forKey: "aiCommentsEnabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(aiCommentsEnabled, forKey: "aiCommentsEnabled") }
+    }
+    @Published var selectedProvider: CommentProvider = .ollama {
+        didSet { UserDefaults.standard.set(selectedProvider.rawValue, forKey: "selectedProvider") }
+    }
+    @Published var selectedOllamaModel: OllamaModel = .qwen25vl_3b {
+        didSet { UserDefaults.standard.set(selectedOllamaModel.rawValue, forKey: "selectedOllamaModel") }
+    }
+    @Published var selectedGeminiModel: GeminiModel = .flash25Lite {
+        didSet { UserDefaults.standard.set(selectedGeminiModel.rawValue, forKey: "selectedGeminiModel") }
+    }
     @Published var geminiApiKey: String = "" {
         didSet { UserDefaults.standard.set(geminiApiKey, forKey: "geminiApiKey") }
     }
 
     // Pipeline mode
-    @Published var pipelineMode: PipelineMode = .basic
+    @Published var pipelineMode: PipelineMode = .basic {
+        didSet { UserDefaults.standard.set(pipelineMode.rawValue, forKey: "pipelineMode") }
+    }
 
     // Persona
     @Published var personaEnabled: [Persona: Bool] = [
@@ -62,6 +74,39 @@ final class CommentViewModel: ObservableObject {
     @Published var fontWeightBold: Bool = true
     @Published var scrollDuration: Double = 6.0
 
+    // Remote posting
+    @Published var remotePostingEnabled: Bool = UserDefaults.standard.bool(forKey: "remotePostingEnabled") {
+        didSet {
+            UserDefaults.standard.set(remotePostingEnabled, forKey: "remotePostingEnabled")
+            guard isRunning else { return }
+            if remotePostingEnabled {
+                startRemotePolling()
+            } else {
+                stopRemotePolling()
+            }
+        }
+    }
+    @Published var remoteSupabaseURL: String = UserDefaults.standard.string(forKey: "remoteSupabaseURL") ?? "" {
+        didSet { UserDefaults.standard.set(remoteSupabaseURL, forKey: "remoteSupabaseURL") }
+    }
+    @Published var remoteSupabaseAnonKey: String = UserDefaults.standard.string(forKey: "remoteSupabaseAnonKey") ?? "" {
+        didSet { UserDefaults.standard.set(remoteSupabaseAnonKey, forKey: "remoteSupabaseAnonKey") }
+    }
+    @Published var remoteWebBaseURL: String = UserDefaults.standard.string(forKey: "remoteWebBaseURL") ?? "" {
+        didSet { UserDefaults.standard.set(Self.normalizedRemoteWebBaseURL(remoteWebBaseURL), forKey: "remoteWebBaseURL") }
+    }
+    @Published var remoteRoomCode: String = UserDefaults.standard.string(forKey: "remoteRoomCode") ?? "" {
+        didSet { UserDefaults.standard.set(remoteRoomCode, forKey: "remoteRoomCode") }
+    }
+    @Published var remoteHostAdminToken: String = "" {
+        didSet { KeychainStore.set(remoteHostAdminToken, for: "hostAdminToken") }
+    }
+    @Published var remoteHostToken: String = "" {
+        didSet { KeychainStore.set(remoteHostToken, for: "hostToken") }
+    }
+    @Published var remoteStatusMessage: String = ""
+    @Published var isSourceRevealActive: Bool = false
+
     static let laneHeight: CGFloat = 44
     static let topMargin: CGFloat = 30
 
@@ -69,6 +114,8 @@ final class CommentViewModel: ObservableObject {
     private let ollamaService = OllamaService()
     private let geminiService = GeminiService()
     private let userInputMonitor = UserInputMonitor()
+    private let remoteCommentService = RemoteCommentService()
+    private let sourceRevealHotkeyMonitor = SourceRevealHotkeyMonitor()
     private let captureInterval: TimeInterval = 4.0
     private let scrollCommentDuration: TimeInterval = 7.0
     private let fixedCommentDuration: TimeInterval = 4.0
@@ -79,9 +126,19 @@ final class CommentViewModel: ObservableObject {
         return max(1, Int((screenHeight - Self.topMargin) / Self.laneHeight))
     }
 
-    private var scheduledReleases: [(text: String, style: CommentStyle, color: CommentColor, speedMultiplier: Double, releaseAt: Date)] = []
+    private var scheduledReleases: [(
+        text: String,
+        style: CommentStyle,
+        color: CommentColor,
+        speedMultiplier: Double,
+        releaseAt: Date,
+        source: CommentSource
+    )] = []
     private var releaseTimer: Timer?
     private var captureTask: Task<Void, Never>?
+    private var remotePollTask: Task<Void, Never>?
+    private var lastRemoteCommentID: Int64 = 0
+    private var lastRemoteEmptyPollStatusAt: Date?
 
     // State tracking
     private var changeLevel: Double = 0.05
@@ -91,43 +148,135 @@ final class CommentViewModel: ObservableObject {
     private var cachedOCRText: String?
     private var recentCommentTexts: [String] = []
     private var lastUsedLanes: [Int] = []
+    private var nextAIGenerationAllowedAt: Date?
+    private var generationErrorCount = 0
 
     init() {
+        if let rawProvider = UserDefaults.standard.string(forKey: "selectedProvider"),
+           let provider = CommentProvider(rawValue: rawProvider) {
+            self.selectedProvider = provider
+        }
+        if let rawModel = UserDefaults.standard.string(forKey: "selectedOllamaModel"),
+           let model = OllamaModel(rawValue: rawModel) {
+            self.selectedOllamaModel = model
+        }
+        if let rawModel = UserDefaults.standard.string(forKey: "selectedGeminiModel"),
+           let model = GeminiModel(rawValue: rawModel) {
+            self.selectedGeminiModel = model
+        }
+        if let rawMode = UserDefaults.standard.string(forKey: "pipelineMode"),
+           let mode = PipelineMode(rawValue: rawMode) {
+            self.pipelineMode = mode
+        }
+
         self.geminiApiKey = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
+        self.remoteHostAdminToken = KeychainStore.string(for: "hostAdminToken")
+        self.remoteHostToken = KeychainStore.string(for: "hostToken")
+
+        let normalizedWebBaseURL = Self.normalizedRemoteWebBaseURL(remoteWebBaseURL)
+        if normalizedWebBaseURL != remoteWebBaseURL {
+            remoteWebBaseURL = normalizedWebBaseURL
+        }
+    }
+
+    var remotePostingURL: String? {
+        let baseURL = Self.normalizedRemoteWebBaseURL(remoteWebBaseURL)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let code = remoteRoomCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !baseURL.isEmpty, !code.isEmpty else { return nil }
+        return "\(baseURL)/r/\(code)"
     }
 
     // MARK: - Public
 
+    func refreshScreenRecordingPermissionStatus() {
+        isScreenRecordingPermissionGranted = ScreenCaptureService.hasScreenRecordingPermission
+    }
+
+    func requestScreenRecordingPermission() {
+        _ = ScreenCaptureService.requestScreenRecordingPermission()
+        refreshScreenRecordingPermissionStatus()
+        if isScreenRecordingPermissionGranted {
+            statusMessage = "Screen Recording permission is active"
+        } else {
+            statusMessage = "Enable ScreenCommentator in System Settings, then quit and run the app again"
+            openScreenRecordingSettings()
+        }
+    }
+
+    func openScreenRecordingSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
     func start() async {
         guard !isRunning else { return }
+
+        guard aiCommentsEnabled || remotePostingEnabled else {
+            statusMessage = "Enable AI Comments or Remote Posting before starting"
+            return
+        }
+
+        if aiCommentsEnabled {
+            guard ScreenCaptureService.hasScreenRecordingPermission else {
+                isScreenRecordingPermissionGranted = false
+                _ = ScreenCaptureService.requestScreenRecordingPermission()
+                openScreenRecordingSettings()
+                statusMessage = "Screen Recording permission requested. Enable ScreenCommentator in System Settings, quit it, and open it again."
+                return
+            }
+            isScreenRecordingPermissionGranted = true
+        }
+
         isRunning = true
         commentCount = 0
 
-        switch selectedProvider {
-        case .ollama:
-            statusMessage = "Connecting to Ollama..."
-            let ready = await ollamaService.ensureRunning()
-            guard ready else {
-                statusMessage = "Ollama not found. Install from ollama.com"
-                isRunning = false
-                return
-            }
-        case .gemini:
-            guard !geminiApiKey.isEmpty else {
-                statusMessage = "Gemini API key is required"
-                isRunning = false
-                return
+        if aiCommentsEnabled {
+            switch selectedProvider {
+            case .ollama:
+                statusMessage = "Connecting to Ollama..."
+                let ready = await ollamaService.ensureRunning()
+                guard ready else {
+                    statusMessage = "Ollama not found. Install from ollama.com"
+                    isRunning = false
+                    return
+                }
+                guard await resolveSelectedOllamaModel() else {
+                    isRunning = false
+                    return
+                }
+            case .gemini:
+                guard !geminiApiKey.isEmpty else {
+                    statusMessage = "Gemini API key is required"
+                    isRunning = false
+                    return
+                }
             }
         }
 
-        statusMessage = "Starting screen capture..."
+        statusMessage = aiCommentsEnabled ? "Starting screen capture..." : "Running - AI comments off"
         startReleaseTimer()
+        startSourceRevealHotkeyMonitor()
 
-        if blacklistEnabled {
+        if aiCommentsEnabled, blacklistEnabled {
             activeAppMonitor.startMonitoring()
         }
 
-        userInputMonitor.start()
+        if aiCommentsEnabled {
+            userInputMonitor.start()
+        }
+
+        if remotePostingEnabled {
+            startRemotePolling()
+        } else if hasRemotePostingConfiguration {
+            remoteStatusMessage = "Remote posting is off. Turn Enable on to fetch web comments."
+        }
+
+        guard aiCommentsEnabled else {
+            return
+        }
 
         let provider = selectedProvider
         let ollamaModel = selectedOllamaModel
@@ -162,6 +311,38 @@ final class CommentViewModel: ObservableObject {
         }
     }
 
+    private func resolveSelectedOllamaModel() async -> Bool {
+        let installed = await ollamaService.installedModelNames()
+        guard !installed.isEmpty else {
+            statusMessage = "No Ollama models found. Install a vision model such as qwen2.5vl:32b"
+            return false
+        }
+
+        if installed.contains(selectedOllamaModel.rawValue) {
+            return true
+        }
+
+        let preferredFallbacks: [OllamaModel] = [
+            .gemma4_e4b,
+            .qwen25vl_32b,
+            .gemma4_31b,
+            .qwen25vl_3b,
+            .qwen3_vl_8b,
+            .gemma3_4b,
+            .gemma3_12b,
+        ]
+
+        if let fallback = preferredFallbacks.first(where: { installed.contains($0.rawValue) }) {
+            let previous = selectedOllamaModel.rawValue
+            selectedOllamaModel = fallback
+            statusMessage = "Ollama model \(previous) is not installed. Using \(fallback.rawValue)"
+            return true
+        }
+
+        statusMessage = "Selected Ollama model is not installed. Install qwen2.5vl:32b or choose an installed vision model."
+        return false
+    }
+
     func stop() {
         guard isRunning else { return }
         isRunning = false
@@ -175,6 +356,9 @@ final class CommentViewModel: ObservableObject {
         isBlacklistTriggered = false
 
         userInputMonitor.stop()
+        sourceRevealHotkeyMonitor.stop()
+        isSourceRevealActive = false
+        stopRemotePolling()
 
         releaseTimer?.invalidate()
         releaseTimer = nil
@@ -188,6 +372,9 @@ final class CommentViewModel: ObservableObject {
         lastMood = "general"
         lastExcitement = 5
         changeLevel = 0.05
+        lastRemoteCommentID = 0
+        nextAIGenerationAllowedAt = nil
+        generationErrorCount = 0
     }
 
     func addTestComment() {
@@ -195,6 +382,47 @@ final class CommentViewModel: ObservableObject {
         let text = texts.randomElement()!
         let comment = Comment(text: text, lane: Int.random(in: 0..<laneCount))
         activeComments.append(comment)
+    }
+
+    func createRemoteRoom() async {
+        let supabaseURL = remoteSupabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonKey = remoteSupabaseAnonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let adminToken = remoteHostAdminToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !supabaseURL.isEmpty, !anonKey.isEmpty, !adminToken.isEmpty else {
+            remoteStatusMessage = "Supabase URL, anon key, and host admin token are required"
+            return
+        }
+
+        remoteStatusMessage = "Creating room..."
+        do {
+            let room = try await remoteCommentService.createRoom(
+                supabaseURL: supabaseURL,
+                anonKey: anonKey,
+                adminToken: adminToken
+            )
+            remoteRoomCode = room.roomCode
+            remoteHostToken = room.hostToken
+            lastRemoteCommentID = 0
+            remotePostingEnabled = true
+            remoteStatusMessage = "Room \(room.roomCode) created. Remote posting enabled."
+
+            if remotePostingEnabled, isRunning {
+                startRemotePolling()
+            }
+        } catch {
+            remoteStatusMessage = "Room creation failed: \(error.localizedDescription)"
+        }
+    }
+
+    func fetchRemoteCommentsNow() {
+        guard isRunning else {
+            remoteStatusMessage = "Press Start before fetching web comments"
+            return
+        }
+        Task {
+            await pollRemoteComments(reportEmptyResult: true)
+        }
     }
 
     // MARK: - Persona Selection
@@ -232,6 +460,15 @@ final class CommentViewModel: ObservableObject {
         apiKey: String,
         pipeline: PipelineMode
     ) async {
+        if let allowedAt = nextAIGenerationAllowedAt {
+            let remaining = allowedAt.timeIntervalSinceNow
+            if remaining > 0 {
+                statusMessage = "Running - waiting \(Int(ceil(remaining)))s before next AI request"
+                return
+            }
+            nextAIGenerationAllowedAt = nil
+        }
+
         let thumbnail = createThumbnail(image)
         let change = computeChangeLevel(current: thumbnail)
 
@@ -337,6 +574,12 @@ final class CommentViewModel: ObservableObject {
             lastExcitement = batch.excitement
             scheduleCommentRelease(batch.comments, persona: persona, mood: batch.mood)
             commentCount += batch.comments.count
+            generationErrorCount = 0
+
+            let cooldown = generationCooldownAfterSuccess(for: provider)
+            if cooldown > 0 {
+                nextAIGenerationAllowedAt = Date().addingTimeInterval(cooldown)
+            }
 
             recentCommentTexts.append(contentsOf: batch.comments)
             if recentCommentTexts.count > 30 {
@@ -348,9 +591,44 @@ final class CommentViewModel: ObservableObject {
         } catch is CancellationError {
             print("[ScreenCommentator] Request cancelled")
         } catch {
-            print("[ScreenCommentator] Generation failed: \(error.localizedDescription)")
-            statusMessage = "Running (generation error, retrying...)"
+            generationErrorCount += 1
+            let delay = generationRetryDelay(for: error, provider: provider)
+            nextAIGenerationAllowedAt = Date().addingTimeInterval(delay)
+            let message = generationErrorStatusMessage(for: error)
+            print("[ScreenCommentator] Generation failed: \(message)")
+            statusMessage = "Running - \(message). Retrying in \(Int(delay))s"
         }
+    }
+
+    private func generationCooldownAfterSuccess(for provider: CommentProvider) -> TimeInterval {
+        switch provider {
+        case .gemini:
+            return 15
+        case .ollama:
+            return 0
+        }
+    }
+
+    private func generationRetryDelay(for error: Error, provider: CommentProvider) -> TimeInterval {
+        if case GeminiError.rateLimited(_, let retryAfter) = error {
+            return max(retryAfter ?? 60, 30)
+        }
+
+        let base: TimeInterval = provider == .gemini ? 15 : 8
+        let multiplier = pow(2.0, Double(min(generationErrorCount - 1, 3)))
+        return min(base * multiplier, 120)
+    }
+
+    private func generationErrorStatusMessage(for error: Error) -> String {
+        let raw = error.localizedDescription
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let fallback = raw.isEmpty ? "AI generation failed" : raw
+        if fallback.count <= 180 {
+            return fallback
+        }
+        return String(fallback.prefix(177)) + "..."
     }
 
     // MARK: - Excitement
@@ -386,7 +664,12 @@ final class CommentViewModel: ObservableObject {
 
     // MARK: - Scheduled Release
 
-    private func scheduleCommentRelease(_ comments: [String], persona: Persona, mood: String) {
+    private func scheduleCommentRelease(
+        _ comments: [String],
+        persona: Persona,
+        mood: String,
+        source: CommentSource = .ai
+    ) {
         guard !comments.isEmpty else { return }
         let now = Date()
         let instant = persona == .barrage
@@ -410,7 +693,8 @@ final class CommentViewModel: ObservableObject {
                 style: style,
                 color: color,
                 speedMultiplier: speed,
-                releaseAt: now.addingTimeInterval(delay)
+                releaseAt: now.addingTimeInterval(delay),
+                source: source
             ))
         }
 
@@ -442,9 +726,109 @@ final class CommentViewModel: ObservableObject {
                 lane: assignLane(),
                 style: entry.style,
                 color: entry.color,
-                speedMultiplier: entry.speedMultiplier
+                speedMultiplier: entry.speedMultiplier,
+                source: entry.source
             )
             activeComments.append(comment)
+        }
+    }
+
+    // MARK: - Remote Posting
+
+    private func startRemotePolling() {
+        stopRemotePolling()
+
+        let supabaseURL = remoteSupabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonKey = remoteSupabaseAnonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let roomCode = remoteRoomCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let hostToken = remoteHostToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !supabaseURL.isEmpty, !anonKey.isEmpty, !roomCode.isEmpty, !hostToken.isEmpty else {
+            remoteStatusMessage = "Remote posting needs Supabase URL, anon key, room code, and host token"
+            return
+        }
+
+        remoteStatusMessage = "Remote posting connected to room \(roomCode)"
+        lastRemoteEmptyPollStatusAt = nil
+        remotePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.pollRemoteComments(reportEmptyResult: false)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func stopRemotePolling() {
+        remotePollTask?.cancel()
+        remotePollTask = nil
+    }
+
+    private func pollRemoteComments(reportEmptyResult: Bool) async {
+        let supabaseURL = remoteSupabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonKey = remoteSupabaseAnonKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let roomCode = remoteRoomCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let hostToken = remoteHostToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        do {
+            let comments = try await remoteCommentService.fetchComments(
+                supabaseURL: supabaseURL,
+                anonKey: anonKey,
+                roomCode: roomCode,
+                hostToken: hostToken,
+                afterID: lastRemoteCommentID
+            )
+            if comments.isEmpty {
+                updateRemoteEmptyPollStatus(roomCode: roomCode, force: reportEmptyResult)
+                return
+            }
+
+            lastRemoteCommentID = max(lastRemoteCommentID, comments.map(\.id).max() ?? lastRemoteCommentID)
+            enqueueRemoteComments(comments.map(\.content))
+            remoteStatusMessage = "Remote posting received \(comments.count) comment(s). Last id: \(lastRemoteCommentID)"
+        } catch is CancellationError {
+            return
+        } catch {
+            remoteStatusMessage = "Remote polling error: \(error.localizedDescription)"
+        }
+    }
+
+    private var hasRemotePostingConfiguration: Bool {
+        !remoteSupabaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !remoteSupabaseAnonKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !remoteRoomCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        !remoteHostToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func updateRemoteEmptyPollStatus(roomCode: String, force: Bool) {
+        let now = Date()
+        if force ||
+            lastRemoteEmptyPollStatusAt == nil ||
+            now.timeIntervalSince(lastRemoteEmptyPollStatusAt!) >= 5 {
+            remoteStatusMessage = "Remote polling room \(roomCode): no new comments. Last id: \(lastRemoteCommentID)"
+            lastRemoteEmptyPollStatusAt = now
+        }
+    }
+
+    private func enqueueRemoteComments(_ comments: [String]) {
+        let cleaned = comments
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+
+        scheduleCommentRelease(cleaned, persona: .standard, mood: lastMood, source: .user)
+        commentCount += cleaned.count
+
+        recentCommentTexts.append(contentsOf: cleaned)
+        if recentCommentTexts.count > 30 {
+            recentCommentTexts.removeFirst(recentCommentTexts.count - 30)
+        }
+    }
+
+    private func startSourceRevealHotkeyMonitor() {
+        sourceRevealHotkeyMonitor.start { [weak self] active in
+            Task { @MainActor [weak self] in
+                self?.isSourceRevealActive = active
+            }
         }
     }
 
@@ -505,6 +889,20 @@ final class CommentViewModel: ObservableObject {
             default: return .white
             }
         }
+    }
+
+    private static func normalizedRemoteWebBaseURL(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        if let range = trimmed.range(
+            of: #"https?://[^\s]+"#,
+            options: .regularExpression
+        ) {
+            return String(trimmed[range]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+
+        return trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     // MARK: - Scene Change Detection

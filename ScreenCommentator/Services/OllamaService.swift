@@ -4,6 +4,9 @@ import CoreGraphics
 
 enum OllamaModel: String, CaseIterable, Identifiable, Sendable {
     case qwen25vl_3b = "qwen2.5vl:3b"
+    case qwen25vl_32b = "qwen2.5vl:32b"
+    case gemma4_e4b = "gemma4:e4b"
+    case gemma4_31b = "gemma4:31b"
     case gemma3_4b = "gemma3:4b"
     case gemma3_12b = "gemma3:12b"
     case qwen3_vl_8b = "qwen3-vl:8b"
@@ -13,6 +16,9 @@ enum OllamaModel: String, CaseIterable, Identifiable, Sendable {
     var displayName: String {
         switch self {
         case .qwen25vl_3b: return "Qwen2.5-VL 3B (fast)"
+        case .qwen25vl_32b: return "Qwen2.5-VL 32B"
+        case .gemma4_e4b: return "Gemma 4 E4B"
+        case .gemma4_31b: return "Gemma 4 31B"
         case .gemma3_4b: return "Gemma 3 4B"
         case .gemma3_12b: return "Gemma 3 12B"
         case .qwen3_vl_8b: return "Qwen3-VL 8B (slow)"
@@ -112,7 +118,9 @@ final class OllamaService {
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
-            throw OllamaError.requestFailed
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let detail = Self.errorMessage(from: data) ?? String(data: data, encoding: .utf8) ?? "unknown"
+            throw OllamaError.requestFailed("HTTP \(statusCode): \(detail)")
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -137,6 +145,24 @@ final class OllamaService {
             return (response as? HTTPURLResponse)?.statusCode == 200
         } catch {
             return false
+        }
+    }
+
+    func installedModelNames() async -> Set<String> {
+        guard let url = URL(string: "\(baseURL)/api/tags") else { return [] }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let models = json["models"] as? [[String: Any]]
+            else {
+                return []
+            }
+            return Set(models.compactMap { model in
+                (model["model"] as? String) ?? (model["name"] as? String)
+            })
+        } catch {
+            return []
         }
     }
 
@@ -167,16 +193,27 @@ final class OllamaService {
         }
         return false
     }
+
+    private static func errorMessage(from data: Data) -> String? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let error = json["error"] as? String,
+            !error.isEmpty
+        else {
+            return nil
+        }
+        return error
+    }
 }
 
 enum OllamaError: Error, LocalizedError {
-    case requestFailed
+    case requestFailed(String)
     case invalidResponse
 
     var errorDescription: String? {
         switch self {
-        case .requestFailed:
-            return "Ollama request failed - is Ollama running?"
+        case .requestFailed(let detail):
+            return "Ollama request failed: \(detail)"
         case .invalidResponse:
             return "Invalid response from Ollama"
         }

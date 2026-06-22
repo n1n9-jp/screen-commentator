@@ -1,6 +1,7 @@
 @preconcurrency import ScreenCaptureKit
 import Foundation
 import AppKit
+import CoreGraphics
 
 @MainActor
 final class ScreenCaptureService {
@@ -8,6 +9,10 @@ final class ScreenCaptureService {
     private var streamOutput: StreamOutput?
 
     func startCapturing(interval: TimeInterval) async throws -> AsyncStream<CGImage> {
+        guard Self.hasScreenRecordingPermission else {
+            throw CaptureError.screenRecordingPermissionRequired
+        }
+
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard let display = content.displays.first else {
@@ -48,6 +53,15 @@ final class ScreenCaptureService {
             try? await capturedStream.stopCapture()
         }
     }
+
+    static var hasScreenRecordingPermission: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    @discardableResult
+    static func requestScreenRecordingPermission() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
 }
 
 // MARK: - StreamOutput
@@ -82,10 +96,13 @@ private final class StreamOutput: NSObject, SCStreamOutput, @unchecked Sendable 
 // MARK: - Error
 
 enum CaptureError: Error, LocalizedError {
+    case screenRecordingPermissionRequired
     case noDisplayFound
 
     var errorDescription: String? {
         switch self {
+        case .screenRecordingPermissionRequired:
+            return "Screen recording permission is not available. If it already appears enabled in System Settings, toggle it off/on and relaunch the app."
         case .noDisplayFound:
             return "No display found for screen capture"
         }

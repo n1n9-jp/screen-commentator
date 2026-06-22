@@ -73,7 +73,13 @@ final class GeminiService {
 
         guard httpResponse.statusCode == 200 else {
             let body = String(data: data, encoding: .utf8) ?? "unknown"
-            throw GeminiError.requestFailed("HTTP \(httpResponse.statusCode): \(body)")
+            let detail = Self.errorMessage(from: data) ?? body
+            if httpResponse.statusCode == 429 {
+                let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
+                    .flatMap(TimeInterval.init)
+                throw GeminiError.rateLimited(detail, retryAfter: retryAfter)
+            }
+            throw GeminiError.requestFailed("HTTP \(httpResponse.statusCode): \(detail)")
         }
 
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -96,15 +102,34 @@ final class GeminiService {
             return CommentParser.parseBatchResponse(text)
         }
     }
+
+    private static func errorMessage(from data: Data) -> String? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let error = json["error"] as? [String: Any]
+        else {
+            return nil
+        }
+
+        if let message = error["message"] as? String, !message.isEmpty {
+            return message
+        }
+        if let status = error["status"] as? String, !status.isEmpty {
+            return status
+        }
+        return nil
+    }
 }
 
 enum GeminiError: Error, LocalizedError {
     case requestFailed(String)
+    case rateLimited(String, retryAfter: TimeInterval?)
     case invalidResponse
 
     var errorDescription: String? {
         switch self {
         case .requestFailed(let detail): return "Gemini request failed: \(detail)"
+        case .rateLimited(let detail, _): return "Gemini rate limit: \(detail)"
         case .invalidResponse: return "Invalid response from Gemini"
         }
     }

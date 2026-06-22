@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import ScreenCaptureKit
 
 @main
 struct ScreenCommentatorApp: App {
@@ -14,17 +13,8 @@ struct ScreenCommentatorApp: App {
                 .onAppear {
                     appDelegate.showOverlay(viewModel: viewModel)
                 }
-                .task {
-                    await requestScreenCapturePermission()
-                }
         }
         .windowResizability(.contentSize)
-    }
-
-    private func requestScreenCapturePermission() async {
-        // Trigger the Screen Recording permission dialog on app launch
-        // so the user can grant it before clicking Start.
-        _ = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     }
 }
 

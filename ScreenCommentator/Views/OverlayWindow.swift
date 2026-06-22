@@ -69,7 +69,8 @@ struct OverlayContentView: View {
                             fontSize: viewModel.fontSize,
                             textOpacity: viewModel.textOpacity,
                             fontWeightBold: viewModel.fontWeightBold,
-                            scrollDuration: viewModel.scrollDuration
+                            scrollDuration: viewModel.scrollDuration,
+                            isSourceRevealActive: viewModel.isSourceRevealActive
                         )
                     case .top, .bottom:
                         FixedCommentView(
@@ -78,7 +79,8 @@ struct OverlayContentView: View {
                             screenHeight: geometry.size.height,
                             fontSize: viewModel.fontSize,
                             textOpacity: viewModel.textOpacity,
-                            fontWeightBold: viewModel.fontWeightBold
+                            fontWeightBold: viewModel.fontWeightBold,
+                            isSourceRevealActive: viewModel.isSourceRevealActive
                         )
                     }
                 }
@@ -99,6 +101,7 @@ struct ScrollingCommentView: View {
     let textOpacity: Double
     let fontWeightBold: Bool
     let scrollDuration: Double
+    let isSourceRevealActive: Bool
 
     @State private var xOffset: CGFloat = 10000
 
@@ -106,10 +109,23 @@ struct ScrollingCommentView: View {
         scrollDuration * comment.speedMultiplier
     }
 
+    private var foregroundColor: Color {
+        guard isSourceRevealActive else {
+            return Color.white.opacity(textOpacity)
+        }
+
+        switch comment.source {
+        case .ai:
+            return CommentColor.blue.swiftUIColor.opacity(textOpacity)
+        case .user:
+            return CommentColor.yellow.swiftUIColor.opacity(textOpacity)
+        }
+    }
+
     var body: some View {
         Text(comment.text)
             .font(.system(size: fontSize, weight: fontWeightBold ? .bold : .regular))
-            .foregroundColor(Color.white.opacity(textOpacity))
+            .foregroundColor(foregroundColor)
             .shadow(color: .black, radius: 2, x: 1, y: 1)
             .shadow(color: .black, radius: 1, x: -1, y: -1)
             .fixedSize()
@@ -133,6 +149,7 @@ struct FixedCommentView: View {
     let fontSize: CGFloat
     let textOpacity: Double
     let fontWeightBold: Bool
+    let isSourceRevealActive: Bool
 
     @State private var opacity: Double = 0
 
@@ -146,10 +163,23 @@ struct FixedCommentView: View {
 
     private var fixedFontSize: CGFloat { fontSize * 1.5 }
 
+    private var foregroundColor: Color {
+        guard isSourceRevealActive else {
+            return comment.color.swiftUIColor.opacity(textOpacity)
+        }
+
+        switch comment.source {
+        case .ai:
+            return CommentColor.blue.swiftUIColor.opacity(textOpacity)
+        case .user:
+            return CommentColor.yellow.swiftUIColor.opacity(textOpacity)
+        }
+    }
+
     var body: some View {
         Text(comment.text)
             .font(.system(size: fixedFontSize, weight: fontWeightBold ? .bold : .regular))
-            .foregroundColor(comment.color.swiftUIColor.opacity(textOpacity))
+            .foregroundColor(foregroundColor)
             .shadow(color: .black, radius: 2, x: 1, y: 1)
             .shadow(color: .black, radius: 1, x: -1, y: -1)
             .fixedSize()
