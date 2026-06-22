@@ -5,6 +5,7 @@ const MAX_COMMENT_LENGTH = 80;
 const OTP_RESEND_COOLDOWN_SECONDS = 60;
 
 type SessionState = 'checking' | 'signed-out' | 'otp-sent' | 'signed-in';
+type AuthMode = 'password' | 'otp';
 
 function roomCodeFromPath(): string {
   const match = window.location.pathname.match(/\/r\/([A-Za-z0-9_-]+)/);
@@ -36,7 +37,9 @@ function roomURL(roomCode: string): string {
 export function App() {
   const roomCode = useMemo(roomCodeFromPath, []);
   const [sessionState, setSessionState] = useState<SessionState>('checking');
+  const [authMode, setAuthMode] = useState<AuthMode>('password');
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [otp, setOtp] = useState('');
   const [comment, setComment] = useState('');
   const [message, setMessage] = useState('');
@@ -130,6 +133,38 @@ export function App() {
     }
 
     await requestOtp(normalizedEmail);
+  }
+
+  async function signInWithPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage('');
+
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isAllowedMusabiEmail(normalizedEmail)) {
+      setMessage('musabi.ac.jp またはそのサブドメインのメールアドレスを使ってください。');
+      return;
+    }
+
+    if (!password) {
+      setMessage('パスワードを入力してください。');
+      return;
+    }
+
+    setIsBusy(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: normalizedEmail,
+      password,
+    });
+    setIsBusy(false);
+
+    if (error) {
+      setMessage(error.message);
+      return;
+    }
+
+    setPassword('');
+    setSessionState('signed-in');
+    setMessage('');
   }
 
   async function resendOtp() {
@@ -237,6 +272,60 @@ export function App() {
         {sessionState === 'checking' && <p className="muted">確認中...</p>}
 
         {sessionState === 'signed-out' && (
+          <div className="auth-mode" role="tablist" aria-label="ログイン方法">
+            <button
+              type="button"
+              className={authMode === 'password' ? 'mode active' : 'mode'}
+              onClick={() => {
+                setAuthMode('password');
+                setMessage('');
+              }}
+            >
+              パスワード
+            </button>
+            <button
+              type="button"
+              className={authMode === 'otp' ? 'mode active' : 'mode'}
+              onClick={() => {
+                setAuthMode('otp');
+                setMessage('');
+              }}
+            >
+              メールコード
+            </button>
+          </div>
+        )}
+
+        {sessionState === 'signed-out' && authMode === 'password' && (
+          <form onSubmit={signInWithPassword} className="form">
+            <label>
+              メールアドレス
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="name@ct.musabi.ac.jp"
+                autoComplete="email"
+                required
+              />
+            </label>
+            <label>
+              パスワード
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            <button type="submit" disabled={isBusy}>
+              {isBusy ? '確認中...' : 'ログイン'}
+            </button>
+          </form>
+        )}
+
+        {sessionState === 'signed-out' && authMode === 'otp' && (
           <form onSubmit={sendOtp} className="form">
             <label>
               メールアドレス
