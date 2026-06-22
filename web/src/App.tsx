@@ -47,7 +47,7 @@ export function App() {
   const [sessionState, setSessionState] = useState<SessionState>('checking');
   const [isPasswordRecovery, setIsPasswordRecovery] = useState(isPasswordRecoveryURL);
   const [passwordRecoveryComplete, setPasswordRecoveryComplete] = useState(false);
-  const [authMode, setAuthMode] = useState<AuthMode>('password');
+  const [authMode, setAuthMode] = useState<AuthMode>('otp');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -358,16 +358,6 @@ export function App() {
           <div className="auth-mode" role="tablist" aria-label="ログイン方法">
             <button
               type="button"
-              className={authMode === 'password' ? 'mode active' : 'mode'}
-              onClick={() => {
-                setAuthMode('password');
-                setMessage('');
-              }}
-            >
-              パスワード
-            </button>
-            <button
-              type="button"
               className={authMode === 'otp' ? 'mode active' : 'mode'}
               onClick={() => {
                 setAuthMode('otp');
@@ -375,6 +365,16 @@ export function App() {
               }}
             >
               メールコード
+            </button>
+            <button
+              type="button"
+              className={authMode === 'password' ? 'mode active' : 'mode'}
+              onClick={() => {
+                setAuthMode('password');
+                setMessage('');
+              }}
+            >
+              パスワード
             </button>
           </div>
         )}
